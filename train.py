@@ -10,16 +10,18 @@ with open('configs/default.yaml', 'r') as f:
 
 # Model definition
 model = Unet3D(**config['model'])
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Diffusion model
 diffusion = GaussianDiffusion(
     denoise_fn = model,
     **config['diffusion']
-).cuda()
+).to(device)
 
 # Trainer
 trainer = Trainer(
-    diffusion_model = diffusion,
+    diffusion_model=diffusion,
+    device=device,
     **config['trainer'],
     folder = config['training_data_dir']
 )
