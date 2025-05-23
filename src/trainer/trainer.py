@@ -17,12 +17,12 @@ warnings.filterwarnings("ignore")
 
 class Trainer:
     """
-    Trainer class for training a diffusion model.
+    Trainer class for training a diffusion model on multiple GPUs (T4 x 2).
     
     Attributes:
-        model: The model to train.
+        model: The model to train, wrapped with DataParallel for multi-GPU.
         ema: Exponential moving average of the model.
-        ema_model: EMA model, initialized with a copy of the model.
+        ema_model: EMA model, also wrapped with DataParallel.
         update_ema_every: How frequently to update the EMA model.
         step_start_ema: Step at which to start EMA.
         save_model_every: Frequency to save the model.
@@ -45,7 +45,7 @@ class Trainer:
         self,
         diffusion_model: nn.Module,  # Diffusion model to train
         folder: str,  # Path to the folder containing training data
-        device: str,
+        device: str = 'cuda',  # Default to cuda for multi-GPU
         *,
         ema_decay: float = 0.995,  # Exponential moving average decay rate
         num_frames: int = 16,  # Number of frames per video in the dataset
@@ -54,7 +54,7 @@ class Trainer:
         train_num_steps: int = 100000,  # Number of training steps
         gradient_accumulate_every: int = 2,  # Number of steps to accumulate gradients
         amp: bool = False,  # Whether to use automatic mixed precision
-        step_start_ema: int = 2000,  # Step at which to start EMA
+        step_start_ema: int = 2000,  # Step to start EMA
         update_ema_every: int = 10,  # Frequency to update EMA
         save_model_every: int = 1000,  # Frequency to save the model
         results_folder: str = './results',  # Folder to save results
@@ -62,11 +62,12 @@ class Trainer:
         max_grad_norm: Optional[float] = None  # Max gradient norm for clipping (if None, no clipping)
     ):
         """
-        Initializes the trainer with the given parameters.
+        Initializes the trainer with the given parameters for multi-GPU training (T4 x 2).
         
         Args:
             diffusion_model: The model that will be trained.
             folder: Path to the dataset folder.
+            device: Device for training (default: 'cuda' for multi-GPU).
             ema_decay: Decay factor for EMA.
             num_frames: Number of frames in the video data.
             train_batch_size: Batch size for training.
@@ -83,10 +84,23 @@ class Trainer:
         """
         super().__init__()
         
-        self.model = diffusion_model
+        # Check for multi-GPU availability
+        if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+            print("Warning: Expected 2 T4 GPUs, but fewer GPUs or no CUDA detected. Falling back to single device.")
+        
         self.device = device
+        self.model = diffusion_model.to(self.device)
+        # Wrap the model with DataParallel for multi-GPU training
+        if torch.cuda.device_count() > 1:
+            self.model = nn.DataParallel(self.model)
+            print(f"Using {torch.cuda.device_count()} GPUs (T4 x 2) with DataParallel")
+        
         self.ema = EMA(ema_decay)
-        self.ema_model = copy.deepcopy(self.model)
+        self.ema_model = copy.deepcopy(self.model.module if isinstance(self.model, nn.DataParallel) else self.model)
+        # Wrap the EMA model with DataParallel
+        if torch.cuda.device_count() > 1:
+            self.ema_model = nn.DataParallel(self.ema_model)
+        
         self.update_ema_every = update_ema_every
         self.step_start_ema = step_start_ema
         self.save_model_every = save_model_every
@@ -102,8 +116,9 @@ class Trainer:
         print(f'found {len(self.ds)} videos as gif files at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training'
         
-        self.dl = cycle(torch.utils.data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True))
-        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
+        self.dl = cycle(torch.utils.data.DataLoader(self.ds, batch_size=train_batch_size, 
+                                                    shuffle=True, pin_memory=True, num_workers=4))
+        self.opt = Adam(self.model.parameters(), lr=train_lr)
         
         self.step = 0
         
@@ -124,7 +139,9 @@ class Trainer:
         """
         Resets the EMA model by copying the current model's state_dict.
         """
-        self.ema_model.load_state_dict(self.model.state_dict())
+        self.ema_model.load_state_dict(
+            self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict()
+        )
 
     def step_ema(self):
         """
@@ -134,7 +151,10 @@ class Trainer:
         if self.step < self.step_start_ema:
             self.reset_parameters()
             return
-        self.ema.update_model_average(self.ema_model, self.model)
+        self.ema.update_model_average(
+            self.ema_model.module if isinstance(self.ema_model, nn.DataParallel) else self.ema_model,
+            self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+        )
 
     def save(self, milestone: int):
         """
@@ -145,8 +165,8 @@ class Trainer:
         """
         data = {
             'step': self.step,
-            'model': self.model.state_dict(),
-            'ema': self.ema_model.state_dict(),
+            'model': self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict(),
+            'ema': self.ema_model.module.state_dict() if isinstance(self.ema_model, nn.DataParallel) else self.ema_model.state_dict(),
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
@@ -168,8 +188,20 @@ class Trainer:
         data = torch.load(str(self.results_folder / f'model-{milestone}.pt'))
         
         self.step = data['step']
-        self.model.load_state_dict(data['model'], **kwargs)
-        self.ema_model.load_state_dict(data['ema'], **kwargs)
+        model_state = data['model']
+        ema_state = data['ema']
+        
+        # Load state dicts into the model and EMA model
+        if isinstance(self.model, nn.DataParallel):
+            self.model.module.load_state_dict(model_state, **kwargs)
+        else:
+            self.model.load_state_dict(model_state, **kwargs)
+        
+        if isinstance(self.ema_model, nn.DataParallel):
+            self.ema_model.module.load_state_dict(ema_state, **kwargs)
+        else:
+            self.ema_model.load_state_dict(ema_state, **kwargs)
+        
         self.scaler.load_state_dict(data['scaler'])
 
     def train(
@@ -195,6 +227,11 @@ class Trainer:
 
                 if len(data) == 2:
                     video_data, text_data = data
+                    if text_data is not None:
+                        text_data = text_data.to(self.device)
+                else:
+                    video_data = data
+                    text_data = None
 
                 video_data = video_data.to(self.device)
 
@@ -212,9 +249,13 @@ class Trainer:
                             prob_focus_present=prob_focus_present,
                             focus_present_mask=focus_present_mask
                         )
+                    
+                    # Handle loss reduction for DataParallel
+                    if isinstance(loss, torch.Tensor) and loss.dim() > 0:
+                        loss = loss.mean()  # Ensure loss is a scalar for DataParallel
 
-                        # Backpropagate loss
-                        self.scaler.scale(loss / self.gradient_accumulate_every).backward()
+                    # Backpropagate loss
+                    self.scaler.scale(loss / self.gradient_accumulate_every).backward()
 
                 print(f'{self.step}: {loss.item()}')
 
@@ -234,23 +275,6 @@ class Trainer:
 
             if self.step != 0 and self.step % self.save_model_every == 0:
                 milestone = self.step // self.save_model_every
-                # num_samples = self.num_sample_rows ** 2
-                # batches = num_to_groups(num_samples, self.batch_size)
-
-                # # Create dummy text conditions
-                # dummy_texts = ["a circle moving in some direction"] * num_samples
-
-                # # Sample videos from the EMA model
-                # all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n, cond=dummy_texts), batches))
-                # all_videos_list = torch.cat(all_videos_list, dim=0)
-
-                # all_videos_list = nn.functional.pad(all_videos_list, (2, 2, 2, 2))
-
-                # # Rearrange and save the video as a GIF
-                # one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
-                # video_path = str(self.results_folder / str(f'{milestone}.gif'))
-                # video_tensor_to_gif(one_gif, video_path)
-                # log = {**log, 'sample': video_path}
                 self.save(milestone)
 
             log_fn(log)  # Log the information
