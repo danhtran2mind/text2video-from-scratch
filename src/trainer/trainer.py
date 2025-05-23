@@ -23,7 +23,7 @@ class Trainer:
     Attributes:
         model: The model to train, wrapped with DataParallel for multi-GPU.
         ema: Exponential moving average of the model.
-        ema_model: EMA model, also wrapped with DataParallel.
+        ema_model: EMA model, not wrapped with DataParallel.
         update_ema_every: How frequently to update the EMA model.
         step_start_ema: Step at which to start EMA.
         save_model_every: Frequency to save the model.
@@ -107,15 +107,12 @@ class Trainer:
             print(f"Using {num_gpus} GPUs with DataParallel")
         
         self.ema = EMA(ema_decay)
-        # Copy model for EMA, handling DataParallel
+        # Create EMA model without DataParallel
         try:
-            self.ema_model = copy.deepcopy(self.model.module if isinstance(self.model, nn.DataParallel) else self.model)
+            self.ema_model = copy.deepcopy(diffusion_model)  # Copy original model, not DataParallel
+            self.ema_model.to(self.device)
         except Exception as e:
             raise RuntimeError(f"Failed to copy model for EMA: {str(e)}")
-        
-        # Wrap EMA model with DataParallel if multiple GPUs
-        if num_gpus > 1:
-            self.ema_model = nn.DataParallel(self.ema_model)
         
         self.update_ema_every = update_ema_every
         self.step_start_ema = step_start_ema
@@ -180,9 +177,14 @@ class Trainer:
         Resets the EMA model by copying the current model's state_dict.
         """
         try:
-            self.ema_model.load_state_dict(
-                self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict()
+            # Get state dict from underlying model (strip 'module.' prefix if DataParallel)
+            model_state_dict = (
+                self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) 
+                else self.model.state_dict()
             )
+            # Debug: Print first few keys of state dict
+            print("Model state dict keys (first 5):", list(model_state_dict.keys())[:5])
+            self.ema_model.load_state_dict(model_state_dict)
         except Exception as e:
             raise RuntimeError(f"Error in reset_parameters: {str(e)}")
 
@@ -194,10 +196,8 @@ class Trainer:
         if self.step < self.step_start_ema:
             self.reset_parameters()
             return
-        self.ema.update_model_average(
-            self.ema_model.module if isinstance(self.ema_model, nn.DataParallel) else self.ema_model,
-            self.model.module if isinstance(self.model, nn.DataParallel) else self.model
-        )
+        self.ema.update_model_average(self.ema_model, 
+                                     self.model.module if isinstance(self.model, nn.DataParallel) else self.model)
 
     def save(self, milestone: int):
         """
@@ -209,7 +209,7 @@ class Trainer:
         data = {
             'step': self.step,
             'model': self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict(),
-            'ema': self.ema_model.module.state_dict() if isinstance(self.ema_model, nn.DataParallel) else self.ema_model.state_dict(),
+            'ema': self.ema_model.state_dict(),  # EMA model is not DataParallel
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
@@ -245,10 +245,9 @@ class Trainer:
             else:
                 self.model.load_state_dict(model_state, **kwargs)
             
-            if isinstance(self.ema_model, nn.DataParallel):
-                self.ema_model.module.load_state_dict(ema_state, **kwargs)
-            else:
-                self.ema_model.load_state_dict(ema_state, **kwargs)
+            self.ema_model.load_state_dict(ema_state, **kwargs)
+            print("Model state dict keys (first 5):", list(model_state.keys())[:5])
+            print("EMA state dict keys (first 5):", list(ema_state.keys())[:5])
             
             self.scaler.load_state_dict(data['scaler'])
         except Exception as e:
@@ -272,7 +271,6 @@ class Trainer:
 
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
-                # Get the next batch of data
                 try:
                     data = next(self.dl)
                 except Exception as e:
@@ -288,7 +286,7 @@ class Trainer:
 
                 video_data = video_data.to(self.device)
 
-                with autocast(enabled=self.amp):  # Automatic mixed precision
+                with autocast(enabled=self.amp):
                     try:
                         if text_data is not None:
                             loss = self.model(
@@ -306,11 +304,9 @@ class Trainer:
                     except Exception as e:
                         raise RuntimeError(f"Error during model forward pass: {str(e)}")
                     
-                    # Handle loss reduction for DataParallel
                     if isinstance(loss, torch.Tensor) and loss.dim() > 0:
-                        loss = loss.mean()  # Ensure scalar loss
+                        loss = loss.mean()
 
-                    # Backpropagate loss
                     try:
                         self.scaler.scale(loss / self.gradient_accumulate_every).backward()
                     except Exception as e:
