@@ -21,7 +21,7 @@ diffusion = GaussianDiffusion(
 # Trainer
 trainer = Trainer(
     diffusion_model=diffusion,
-    gradient_accumulate_every=2,
+    # gradient_accumulate_every=1,
     amp=True,  # Enable mixed precision for T4 GPUs
     device=device,
     **config['trainer'],
