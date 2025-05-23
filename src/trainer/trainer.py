@@ -109,7 +109,7 @@ class Trainer:
         self.ema = EMA(ema_decay)
         # Create EMA model without DataParallel
         try:
-            self.ema_model = copy.deepcopy(diffusion_model)  # Copy original model, not DataParallel
+            self.ema_model = copy.deepcopy(diffusion_model)
             self.ema_model.to(self.device)
         except Exception as e:
             raise RuntimeError(f"Failed to copy model for EMA: {str(e)}")
@@ -177,12 +177,10 @@ class Trainer:
         Resets the EMA model by copying the current model's state_dict.
         """
         try:
-            # Get state dict from underlying model (strip 'module.' prefix if DataParallel)
             model_state_dict = (
                 self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) 
                 else self.model.state_dict()
             )
-            # Debug: Print first few keys of state dict
             print("Model state dict keys (first 5):", list(model_state_dict.keys())[:5])
             self.ema_model.load_state_dict(model_state_dict)
         except Exception as e:
@@ -209,7 +207,7 @@ class Trainer:
         data = {
             'step': self.step,
             'model': self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict(),
-            'ema': self.ema_model.state_dict(),  # EMA model is not DataParallel
+            'ema': self.ema_model.state_dict(),
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
@@ -278,7 +276,14 @@ class Trainer:
 
                 if len(data) == 2:
                     video_data, text_data = data
-                    if text_data is not None:
+                    # Handle text_data if it's a list (e.g., list of strings)
+                    if isinstance(text_data, list):
+                        print("Warning: text_data is a list, not a tensor. Skipping device transfer.")
+                        # Placeholder: Convert list to tensor if needed
+                        # Example: Tokenize and convert to tensor (adapt based on your needs)
+                        # text_data = torch.tensor([tokenize(t) for t in text_data]).to(self.device)
+                        # For now, pass as-is if model accepts list
+                    elif text_data is not None:
                         text_data = text_data.to(self.device)
                 else:
                     video_data = data
