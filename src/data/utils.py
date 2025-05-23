@@ -85,6 +85,53 @@ def gif_to_tensor(
     tensors = tuple(map(transform, seek_all_images(img, channels=channels)))  # Transform each frame
     return torch.stack(tensors, dim=1)  # Stack frames along the temporal dimension
 
+def mp4_to_tensor(
+    path: str,
+    channels: int = 3,
+    transform: T.Compose = T.ToTensor()
+) -> torch.Tensor:
+    """
+    Converts an MP4 video to a video tensor.
+
+    Args:
+        path (str): Path to the MP4 file.
+        channels (int): Number of channels (1, 3, or 4).
+        transform (T.Compose): Transformation to apply to each frame (default: T.ToTensor).
+
+    Returns:
+        torch.Tensor: The video tensor of shape (channels, frames, height, width).
+    """
+    # Read the MP4 video
+    reader = imageio.get_reader(path, 'ffmpeg')
+    
+    # List to store transformed frames
+    tensors = []
+    
+    # Process each frame
+    for frame in reader:
+        # Convert frame (numpy array) to PIL Image
+        frame = Image.fromarray(frame)
+        
+        # Handle channel conversion
+        if channels == 1:
+            frame = frame.convert('L')  # Grayscale
+        elif channels == 3:
+            frame = frame.convert('RGB')
+        elif channels == 4:
+            frame = frame.convert('RGBA')
+        else:
+            raise ValueError("Channels must be 1, 3, or 4")
+        
+        # Apply the provided transform
+        tensor = transform(frame)
+        tensors.append(tensor)
+    
+    # Close the reader
+    reader.close()
+    
+    # Stack frames along the temporal dimension
+    return torch.stack(tensors, dim=1)
+
 def identity(t, *args, **kwargs):
     """
     Identity function that returns the input unchanged.
