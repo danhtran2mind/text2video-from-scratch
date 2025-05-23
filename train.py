@@ -22,7 +22,7 @@ diffusion = GaussianDiffusion(
 trainer = Trainer(
     diffusion_model=diffusion,
     # gradient_accumulate_every=1,
-    amp=True,  # Enable mixed precision for T4 GPUs
+    # amp=True,  # Enable mixed precision for T4 GPUs
     device=device,
     **config['trainer'],
     folder = config['training_data_dir']
