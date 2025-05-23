@@ -5,6 +5,7 @@ import yaml
 import torch
 import numpy as np
 from PIL import Image
+import imageio  # Added for MP4 saving
 from src.architecture.unet import Unet3D
 from src.diffusion.gaussian_diffusion import GaussianDiffusion
 
@@ -17,12 +18,13 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description="Generate a video using a trained diffusion model and save as a GIF.")
+    parser = argparse.ArgumentParser(description="Generate a video using a trained diffusion model and save as a GIF or MP4.")
     parser.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH, help="Path to the trained model checkpoint (.pt file).")
-    parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR, help="Directory to save the output GIF.")
+    parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR, help="Directory to save the output file.")
     parser.add_argument("--text", type=str, required=True, help="Text prompt for video generation.")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for video generation.")
     parser.add_argument("--cond_scale", type=float, default=2.0, help="Conditioning scale for diffusion sampling.")
+    parser.add_argument("--format", type=str, choices=["gif", "mp4", "both"], default="mp4", help="Output format: 'gif', 'mp4', or 'both'.")
     return parser.parse_args()
 
 
@@ -73,7 +75,6 @@ def generate_video(diffusion: GaussianDiffusion, text: str, batch_size: int, con
 
 def save_video_as_gif_pil(video_tensor: torch.Tensor, output_path: str) -> None:
     """Convert a generated video tensor into a GIF and save it using PIL."""
-    
     # Move tensor to CPU, remove batch dimension, and convert to NumPy
     video_np = (video_tensor.squeeze(0).permute(1, 2, 3, 0).cpu().numpy() * 255).astype(np.uint8)
 
@@ -84,6 +85,19 @@ def save_video_as_gif_pil(video_tensor: torch.Tensor, output_path: str) -> None:
     frames[0].save(output_path, save_all=True, append_images=frames[1:], duration=100, loop=0)
 
     print(f"Saved GIF: {output_path}")
+
+
+def save_video_as_mp4(video_tensor: torch.Tensor, output_path: str, fps: int = 10) -> None:
+    """Convert a generated video tensor into an MP4 and save it using imageio."""
+    # Move tensor to CPU, remove batch dimension, and convert to NumPy
+    video_np = (video_tensor.squeeze(0).permute(1, 2, 3, 0).cpu().numpy() * 255).astype(np.uint8)
+
+    # Initialize MP4 writer
+    with imageio.get_writer(output_path, fps=fps, codec='libx264') as writer:
+        for frame in video_np:
+            writer.append_data(frame)
+
+    print(f"Saved MP4: {output_path}")
 
 
 def main():
@@ -101,12 +115,17 @@ def main():
     # Generate video
     generated_video = generate_video(diffusion_model, args.text, args.batch_size, args.cond_scale)
 
-    # Create a filename based on the text prompt
-    gif_filename = sanitize_filename(args.text) + ".gif"
-    output_path = os.path.join(args.output_dir, gif_filename)
+    # Create a base filename based on the text prompt
+    base_filename = sanitize_filename(args.text)
 
-    # Save video as GIF using PIL
-    save_video_as_gif_pil(generated_video, output_path)
+    # Save video based on the chosen format
+    if args.format in ["gif", "both"]:
+        gif_path = os.path.join(args.output_dir, f"{base_filename}.gif")
+        save_video_as_gif_pil(generated_video, gif_path)
+
+    if args.format in ["mp4", "both"]:
+        mp4_path = os.path.join(args.output_dir, f"{base_filename}.mp4")
+        save_video_as_mp4(generated_video, mp4_path)
 
 
 if __name__ == "__main__":
