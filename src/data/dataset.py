@@ -29,7 +29,8 @@ class Dataset(data.Dataset):
         num_frames: int = 16,
         horizontal_flip: bool = False,
         force_num_frames: bool = True,
-        exts: List[str] = ['gif']
+        # exts: List[str] = ['gif']
+        exts: List[str] = ['mp4']
     ) -> None:
         super().__init__()
         self.folder = folder
