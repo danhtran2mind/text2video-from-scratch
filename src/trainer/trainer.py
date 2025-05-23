@@ -10,7 +10,6 @@ from ..architecture.common import EMA
 import torch.nn as nn
 from einops import rearrange
 from typing import Callable, Optional, Union
-import os
 
 # Remove warnings
 import warnings
@@ -18,12 +17,12 @@ warnings.filterwarnings("ignore")
 
 class Trainer:
     """
-    Trainer class for training a diffusion model on two T4 GPUs in a Kaggle environment.
+    Trainer class for training a diffusion model.
     
     Attributes:
-        model: The model to train, wrapped with DataParallel for multi-GPU.
+        model: The model to train.
         ema: Exponential moving average of the model.
-        ema_model: EMA model, not wrapped with DataParallel.
+        ema_model: EMA model, initialized with a copy of the model.
         update_ema_every: How frequently to update the EMA model.
         step_start_ema: Step at which to start EMA.
         save_model_every: Frequency to save the model.
@@ -46,29 +45,27 @@ class Trainer:
         self,
         diffusion_model: nn.Module,  # Diffusion model to train
         folder: str,  # Path to the folder containing training data
-        device: str = 'cuda',  # Default to cuda for multi-GPU
         *,
         ema_decay: float = 0.995,  # Exponential moving average decay rate
         num_frames: int = 16,  # Number of frames per video in the dataset
-        train_batch_size: int = 1,  # Batch size for training (very small)
+        train_batch_size: int = 32,  # Batch size for training
         train_lr: float = 1e-4,  # Learning rate for the optimizer
         train_num_steps: int = 100000,  # Number of training steps
-        gradient_accumulate_every: int = 1,  # Number of steps to accumulate gradients
-        amp: bool = True,  # Use automatic mixed precision for T4 GPUs
-        step_start_ema: int = 2000,  # Step to start EMA
+        gradient_accumulate_every: int = 2,  # Number of steps to accumulate gradients
+        amp: bool = False,  # Whether to use automatic mixed precision
+        step_start_ema: int = 2000,  # Step at which to start EMA
         update_ema_every: int = 10,  # Frequency to update EMA
         save_model_every: int = 1000,  # Frequency to save the model
         results_folder: str = './results',  # Folder to save results
         num_sample_rows: int = 4,  # Number of rows for video sampling
-        max_grad_norm: Optional[float] = None  # Max gradient norm for clipping
+        max_grad_norm: Optional[float] = None  # Max gradient norm for clipping (if None, no clipping)
     ):
         """
-        Initializes the trainer with parameters optimized for T4 x 2 GPUs.
+        Initializes the trainer with the given parameters.
         
         Args:
             diffusion_model: The model that will be trained.
-            folder: Path to the dataset folder (e.g., '/kaggle/input/your-dataset').
-            device: Device for training (default: 'cuda' for multi-GPU).
+            folder: Path to the dataset folder.
             ema_decay: Decay factor for EMA.
             num_frames: Number of frames in the video data.
             train_batch_size: Batch size for training.
@@ -85,35 +82,9 @@ class Trainer:
         """
         super().__init__()
         
-        # Validate diffusion model attributes
-        required_attrs = ['image_size', 'channels', 'num_frames']
-        for attr in required_attrs:
-            if not hasattr(diffusion_model, attr) or getattr(diffusion_model, attr) is None:
-                raise AttributeError(f"diffusion_model must have a valid '{attr}' attribute")
-        
-        # Check GPU availability
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available. Ensure Kaggle GPU is enabled.")
-        num_gpus = torch.cuda.device_count()
-        print(f"Detected {num_gpus} GPUs: {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
-        if num_gpus < 2:
-            print("Warning: Expected 2 T4 GPUs, but fewer detected. Using available GPUs.")
-        
-        self.device = device
-        self.model = diffusion_model.to(self.device)
-        # Wrap model with DataParallel if multiple GPUs are available
-        if num_gpus > 1:
-            self.model = nn.DataParallel(self.model)
-            print(f"Using {num_gpus} GPUs with DataParallel")
-        
+        self.model = diffusion_model
         self.ema = EMA(ema_decay)
-        # Create EMA model without DataParallel
-        try:
-            self.ema_model = copy.deepcopy(diffusion_model)
-            self.ema_model.to(self.device)
-        except Exception as e:
-            raise RuntimeError(f"Failed to copy model for EMA: {str(e)}")
-        
+        self.ema_model = copy.deepcopy(self.model)
         self.update_ema_every = update_ema_every
         self.step_start_ema = step_start_ema
         self.save_model_every = save_model_every
@@ -122,41 +93,19 @@ class Trainer:
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_num_steps = train_num_steps
         
-        # Validate dataset folder
-        if not os.path.exists(folder):
-            raise FileNotFoundError(f"Dataset folder '{folder}' does not exist")
-        print(f"Checking dataset folder: {folder}")
-        print(f"Files found: {os.listdir(folder)}")
+        # Initialize dataset and dataloader
+        self.ds = Dataset(folder, image_size=diffusion_model.image_size, 
+                          channels=diffusion_model.channels, num_frames=diffusion_model.num_frames)
         
-        # Initialize dataset
-        try:
-            self.ds = Dataset(
-                folder,
-                image_size=diffusion_model.image_size,
-                channels=diffusion_model.channels,
-                num_frames=diffusion_model.num_frames
-            )
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize Dataset: {str(e)}")
+        print(f'found {len(self.ds)} videos as gif files at {folder}')
+        assert len(self.ds) > 0, 'need to have at least 1 video to start training'
         
-        print(f"Found {len(self.ds)} videos as GIF files at {folder}")
-        if len(self.ds) == 0:
-            raise ValueError(f"No valid GIF files found in {folder}")
+        self.dl = cycle(torch.utils.data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True))
+        self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
         
-        # Initialize DataLoader with optimized num_workers
-        self.dl = cycle(torch.utils.data.DataLoader(
-            self.ds,
-            batch_size=train_batch_size,
-            shuffle=True,
-            pin_memory=True,
-            num_workers=min(4, os.cpu_count() or 1)  # Adjust for Kaggle
-        ))
-        
-        # Initialize optimizer
-        self.opt = Adam(self.model.parameters(), lr=train_lr)
         self.step = 0
         
-        # Mixed precision settings for T4 GPUs
+        # Mixed precision settings
         self.amp = amp
         self.scaler = GradScaler(enabled=amp)
         self.max_grad_norm = max_grad_norm
@@ -167,24 +116,13 @@ class Trainer:
         self.results_folder.mkdir(exist_ok=True, parents=True)
         
         # Initialize EMA model
-        try:
-            self.reset_parameters()
-        except Exception as e:
-            raise RuntimeError(f"Failed to reset parameters: {str(e)}")
+        self.reset_parameters()
 
     def reset_parameters(self):
         """
         Resets the EMA model by copying the current model's state_dict.
         """
-        try:
-            model_state_dict = (
-                self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) 
-                else self.model.state_dict()
-            )
-            print("Model state dict keys (first 5):", list(model_state_dict.keys())[:5])
-            self.ema_model.load_state_dict(model_state_dict)
-        except Exception as e:
-            raise RuntimeError(f"Error in reset_parameters: {str(e)}")
+        self.ema_model.load_state_dict(self.model.state_dict())
 
     def step_ema(self):
         """
@@ -194,8 +132,7 @@ class Trainer:
         if self.step < self.step_start_ema:
             self.reset_parameters()
             return
-        self.ema.update_model_average(self.ema_model, 
-                                     self.model.module if isinstance(self.model, nn.DataParallel) else self.model)
+        self.ema.update_model_average(self.ema_model, self.model)
 
     def save(self, milestone: int):
         """
@@ -206,12 +143,11 @@ class Trainer:
         """
         data = {
             'step': self.step,
-            'model': self.model.module.state_dict() if isinstance(self.model, nn.DataParallel) else self.model.state_dict(),
+            'model': self.model.state_dict(),
             'ema': self.ema_model.state_dict(),
             'scaler': self.scaler.state_dict()
         }
         torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
-        print(f"Saved checkpoint to {self.results_folder / f'model-{milestone}.pt'}")
 
     def load(self, milestone: int, **kwargs):
         """
@@ -222,34 +158,17 @@ class Trainer:
             **kwargs: Additional arguments for `state_dict` loading.
         """
         if milestone == -1:
+            # Load the latest checkpoint if milestone is -1
             all_milestones = [int(p.stem.split('-')[-1]) for p in Path(self.results_folder).glob('**/*.pt')]
-            if not all_milestones:
-                raise FileNotFoundError('No checkpoint found to load')
+            assert len(all_milestones) > 0, 'No checkpoint found to load'
             milestone = max(all_milestones)
         
-        checkpoint_path = str(self.results_folder / f'model-{milestone}.pt')
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint {checkpoint_path} not found")
-        
-        data = torch.load(checkpoint_path)
+        data = torch.load(str(self.results_folder / f'model-{milestone}.pt'))
         
         self.step = data['step']
-        model_state = data['model']
-        ema_state = data['ema']
-        
-        try:
-            if isinstance(self.model, nn.DataParallel):
-                self.model.module.load_state_dict(model_state, **kwargs)
-            else:
-                self.model.load_state_dict(model_state, **kwargs)
-            
-            self.ema_model.load_state_dict(ema_state, **kwargs)
-            print("Model state dict keys (first 5):", list(model_state.keys())[:5])
-            print("EMA state dict keys (first 5):", list(ema_state.keys())[:5])
-            
-            self.scaler.load_state_dict(data['scaler'])
-        except Exception as e:
-            raise RuntimeError(f"Error loading checkpoint: {str(e)}")
+        self.model.load_state_dict(data['model'], **kwargs)
+        self.ema_model.load_state_dict(data['ema'], **kwargs)
+        self.scaler.load_state_dict(data['scaler'])
 
     def train(
         self,
@@ -269,77 +188,70 @@ class Trainer:
 
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
-                try:
-                    data = next(self.dl)
-                except Exception as e:
-                    raise RuntimeError(f"Error loading data batch: {str(e)}")
+                # Get the next batch of data
+                data = next(self.dl)
 
                 if len(data) == 2:
                     video_data, text_data = data
-                    # Handle text_data if it's a list (e.g., list of strings)
-                    if isinstance(text_data, list):
-                        print("Warning: text_data is a list, not a tensor. Skipping device transfer.")
-                        # Placeholder: Convert list to tensor if needed
-                        # Example: Tokenize and convert to tensor (adapt based on your needs)
-                        # text_data = torch.tensor([tokenize(t) for t in text_data]).to(self.device)
-                        # For now, pass as-is if model accepts list
-                    elif text_data is not None:
-                        text_data = text_data.to(self.device)
-                else:
-                    video_data = data
-                    text_data = None
 
-                video_data = video_data.to(self.device)
+                video_data = video_data.cuda()
 
-                with autocast(enabled=self.amp):
-                    try:
-                        if text_data is not None:
-                            loss = self.model(
-                                video_data,
-                                cond=text_data,
-                                prob_focus_present=prob_focus_present,
-                                focus_present_mask=focus_present_mask
-                            )
-                        else:
-                            loss = self.model(
-                                video_data,
-                                prob_focus_present=prob_focus_present,
-                                focus_present_mask=focus_present_mask
-                            )
-                    except Exception as e:
-                        raise RuntimeError(f"Error during model forward pass: {str(e)}")
-                    
-                    if isinstance(loss, torch.Tensor) and loss.dim() > 0:
-                        loss = loss.mean()
+                with autocast(enabled=self.amp):  # Automatic mixed precision
+                    if text_data is not None:
+                        loss = self.model(
+                            video_data,
+                            cond=text_data,
+                            prob_focus_present=prob_focus_present,
+                            focus_present_mask=focus_present_mask
+                        )
+                    else:
+                        loss = self.model(
+                            video_data,
+                            prob_focus_present=prob_focus_present,
+                            focus_present_mask=focus_present_mask
+                        )
 
-                    try:
+                        # Backpropagate loss
                         self.scaler.scale(loss / self.gradient_accumulate_every).backward()
-                    except Exception as e:
-                        raise RuntimeError(f"Error during backpropagation: {str(e)}")
 
-                print(f'Step {self.step}: Loss = {loss.item():.6f}')
+                print(f'{self.step}: {loss.item()}')
 
             log = {'loss': loss.item()}
 
             if exists(self.max_grad_norm):
+                # Gradient clipping
                 self.scaler.unscale_(self.opt)
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
-            try:
-                self.scaler.step(self.opt)
-                self.scaler.update()
-                self.opt.zero_grad()
-            except Exception as e:
-                raise RuntimeError(f"Error during optimizer step: {str(e)}")
+            self.scaler.step(self.opt)  # Optimizer step
+            self.scaler.update()  # Update the scaler
+            self.opt.zero_grad()
 
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
             if self.step != 0 and self.step % self.save_model_every == 0:
                 milestone = self.step // self.save_model_every
+                # num_samples = self.num_sample_rows ** 2
+                # batches = num_to_groups(num_samples, self.batch_size)
+
+                # # Create dummy text conditions
+                # dummy_texts = ["a circle moving in some direction"] * num_samples
+
+                # # Sample videos from the EMA model
+                # all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n, cond=dummy_texts), batches))
+                # all_videos_list = torch.cat(all_videos_list, dim=0)
+
+                # all_videos_list = nn.functional.pad(all_videos_list, (2, 2, 2, 2))
+
+                # # Rearrange and save the video as a GIF
+                # one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i=self.num_sample_rows)
+                # video_path = str(self.results_folder / str(f'{milestone}.gif'))
+                # video_tensor_to_gif(one_gif, video_path)
+                # log = {**log, 'sample': video_path}
                 self.save(milestone)
 
-            log_fn(log)
+            log_fn(log)  # Log the information
             self.step += 1
 
         print('Training completed.')
