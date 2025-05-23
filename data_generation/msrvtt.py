@@ -1,143 +1,341 @@
 import os
-import subprocess
-import zipfile
-from pathlib import Path
-from typing import List
-import pandas as pd
+import random
+from typing import Tuple, Dict, List
+from PIL import Image, ImageDraw
+import numpy as np
+import colorsys
 from tqdm import tqdm
-from moviepy.editor import VideoFileClip
-from datasets import load_dataset
+import multiprocessing
+import argparse
 
-
-def download_kaggle_dataset(dataset_name: str, download_dir: str) -> None:
+def create_directory_structure() -> str:
     """
-    Downloads a dataset from Kaggle and saves it to the specified directory.
+    Creates the necessary directories for storing the dataset.
 
-    :param dataset_name: The name of the Kaggle dataset (e.g., 'vishnutheepb/msrvtt').
-    :param download_dir: Directory where the dataset will be saved.
+    Returns:
+        str: The training directory path.
     """
-    # Make sure the directory exists
-    Path(download_dir).mkdir(parents=True, exist_ok=True)
-
-    # Download dataset using Kaggle CLI
-    print(f"Downloading Kaggle dataset: {dataset_name}...")
-    command = f"kaggle datasets download {dataset_name} -p {download_dir}"
-    subprocess.run(command, shell=True, check=True)
-    print(f"Dataset {dataset_name} downloaded to {download_dir}")
-
-
-def unzip_file(zip_path: str, extract_dir: str) -> None:
-    """
-    Unzips a .zip file into the specified directory.
-
-    :param zip_path: Path to the zip file.
-    :param extract_dir: Directory to extract files to.
-    """
-    print(f"Unzipping file: {zip_path}...")
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_dir)
-    print(f"Files extracted to {extract_dir}")
-
-
-def download_hf_dataset(dataset_name: str) -> pd.DataFrame:
-    """
-    Downloads a dataset from HuggingFace.
-
-    :param dataset_name: The name of the dataset on HuggingFace (e.g., 'AlexZigma/msr-vtt').
-    :return: A DataFrame containing the dataset.
-    """
-    print(f"Downloading HuggingFace dataset: {dataset_name}...")
-    dataset = load_dataset(dataset_name, split="train")
-    # Convert the dataset to a pandas DataFrame
-    df = pd.DataFrame(dataset)
-    print(f"HuggingFace dataset {dataset_name} loaded successfully.")
-    return df
-
-
-def convert_video_to_gif(video_path: str, gif_path: str, size: tuple = (64, 64), num_frames: int = 10) -> None:
-    """
-    Converts a video file (MP4) to a GIF with specified size and number of frames.
-
-    :param video_path: Path to the input video (MP4).
-    :param gif_path: Path to save the output GIF.
-    :param size: Desired size for the GIF (default is 64x64).
-    :param num_frames: The number of frames to sample for the GIF (default is 10).
-    """
-    try:
-        # Load the video file
-        clip = VideoFileClip(video_path)
-
-        # Resize the video to the desired size
-        clip = clip.resize(height=size[1], width=size[0])
-        
-        # Sample frames evenly from the video and convert to GIF
-        clip = clip.subclip(0, clip.duration).resize(size).set_fps(clip.fps).set_duration(clip.duration / num_frames)
-
-        clip.write_gif(gif_path, program='ffmpeg')
-
-        print(f"Converted {video_path} to GIF and saved as {gif_path}")
-    except Exception as e:
-        print(f"Error converting video {video_path} to GIF: {e}")
-
-
-def create_training_data(df: pd.DataFrame, videos_dir: str, output_dir: str, size: tuple = (64, 64), num_frames: int = 10) -> None:
-    """
-    Creates a training folder containing GIFs and corresponding caption text files.
-
-    :param df: DataFrame containing video data.
-    :param videos_dir: Directory where videos are stored.
-    :param output_dir: Directory where the training data will be saved.
-    :param size: Desired size for the GIF (default is 64x64).
-    :param num_frames: The number of frames to sample for the GIF (default is 10).
-    """
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-    print("Starting the conversion of videos to GIFs and creating caption text files...")
-    
-    # Use tqdm to show a progress bar while iterating over the rows of the DataFrame
-    for index, row in tqdm(df.iterrows(), total=df.shape[0], desc="Processing Videos", ncols=100):
-        video_id = row['video_id']
-        caption = row['caption']
-        
-        # Define paths
-        video_path = os.path.join(videos_dir, f"{video_id}.mp4")
-        gif_path = os.path.join(output_dir, f"{video_id}.gif")
-        caption_path = os.path.join(output_dir, f"{video_id}.txt")
-        
-        # Convert video to GIF with size and frame limit
-        convert_video_to_gif(video_path, gif_path, size=size, num_frames=num_frames)
-        
-        # Save the caption in a text file
-        with open(caption_path, 'w') as caption_file:
-            caption_file.write(caption)
-    
-    print(f"Training data successfully created in {output_dir}")
-
-
-def main():
-    # Step 1: Download the Kaggle dataset
-    kaggle_dataset_name = 'vishnutheepb/msrvtt'
-    download_dir = './msrvtt_data'
-    download_kaggle_dataset(kaggle_dataset_name, download_dir)
-
-    # Step 2: Unzip the Kaggle dataset
-    zip_file_path = os.path.join(download_dir, 'msrvtt.zip')
-    unzip_dir = os.path.join(download_dir, 'msrvtt')
-    unzip_file(zip_file_path, unzip_dir)
-
-    # Step 3: Define the path to the TrainValVideo directory where the videos are located
-    videos_dir = os.path.join(unzip_dir, 'TrainValVideo')
-
-    # Step 4: Download the HuggingFace MSR-VTT dataset
-    hf_dataset_name = 'AlexZigma/msr-vtt'
-    df = download_hf_dataset(hf_dataset_name)
-
-    # Step 5: Create a training folder
     basename = os.path.basename(os.getcwd())
-    output_dir = "../training_data" if basename == "data_generation" else "./training_data" if basename == "text2video-from-scratch" else os.path.abspath("training_data")
+    training_dir: str = "../training_data" if basename == "data_generation" else "./training_data" if basename == "text2video-from-scratch" else os.path.abspath("training_data")
     
-    create_training_data(df, videos_dir, output_dir, size=(64, 64), num_frames=10)
+    os.makedirs(training_dir, exist_ok=True)
+    
+    return training_dir
 
+def get_random_color() -> Tuple[int, int, int]:
+    """
+    Generates a random vibrant RGB color tuple.
+
+    Returns:
+        Tuple[int, int, int]: A tuple representing an RGB color.
+    """
+    hue: float = random.random()
+    saturation: float = random.uniform(0.5, 1.0)
+    value: float = random.uniform(0.5, 1.0)
+    rgb: Tuple[float, float, float] = colorsys.hsv_to_rgb(hue, saturation, value)
+    return tuple(int(x * 255) for x in rgb)
+
+def generate_random_pattern() -> str:
+    """
+    Chooses a random background pattern from a predefined set.
+
+    Returns:
+        str: The name of the selected pattern.
+    """
+    patterns: List[str] = ['dots', 'grid', 'stripes', 'solid']
+    return random.choice(patterns)
+
+def apply_background_pattern(img: Image.Image, pattern_type: str) -> Tuple[int, int, int]:
+    """
+    Applies a specified background pattern to an image.
+
+    Args:
+        img (Image.Image): The image to apply the pattern to.
+        pattern_type (str): The type of pattern to apply.
+
+    Returns:
+        Tuple[int, int, int]: The background color used for the pattern.
+    """
+    draw: ImageDraw.Draw = ImageDraw.Draw(img)
+    bg_color: Tuple[int, int, int] = get_random_color()
+    
+    if pattern_type == 'solid':
+        draw.rectangle([0, 0, img.width, img.height], fill=bg_color)
+    elif pattern_type == 'dots':
+        for _ in range(20):
+            x: int = random.randint(0, img.width)
+            y: int = random.randint(0, img.height)
+            draw.ellipse([x-2, y-2, x+2, y+2], fill=bg_color)
+    elif pattern_type == 'grid':
+        for x in range(0, img.width, 10):
+            for y in range(0, img.height, 10):
+                draw.rectangle([x, y, x+1, y+1], fill=bg_color)
+    elif pattern_type == 'stripes':
+        for y in range(0, img.height, 8):
+            draw.line([(0, y), (img.width, y)], fill=bg_color)
+    
+    return bg_color
+
+def generate_synthetic_gif(output_path: str, width: int=64, height: int=64, n_frames: int=10) -> Dict:
+    """
+    Generates a synthetic GIF with various animations.
+
+    Args:
+        output_path (str): The path to save the generated GIF.
+        width (int): The width of the GIF.
+        height (int): The height of the GIF.
+        n_frames (int): The number of frames in the GIF.
+
+    Returns:
+        Dict: A dictionary containing the parameters used to generate the GIF.
+    """
+    frames: List[Image.Image] = []
+    
+    animation_type: str = random.choice([
+        'moving_shape', 'growing_shape', 'bouncing_shape',
+        'rotating_shape', 'color_changing', 'multiple_shapes'
+    ])
+    
+    shape_type: str = random.choice(['circle', 'square', 'triangle', 'star'])
+    primary_color: Tuple[int, int, int] = get_random_color()
+    pattern_type: str = generate_random_pattern()
+    
+    speed: float = random.uniform(0.5, 2.0)
+    size_base: int = random.randint(10, 20)
+    start_x: int = random.randint(0, width)
+    start_y: int = random.randint(0, height)
+    
+    for i in range(n_frames):
+        img: Image.Image = Image.new('RGB', (width, height), color='white')
+        bg_color: Tuple[int, int, int] = apply_background_pattern(img, pattern_type)
+        draw: ImageDraw.Draw = ImageDraw.Draw(img)
+        
+        if animation_type == 'moving_shape':
+            x: int = (start_x + int(i * 5 * speed)) % width
+            y: int = start_y
+            if shape_type == 'circle':
+                draw.ellipse([x-size_base, y-size_base, x+size_base, y+size_base], fill=primary_color)
+            elif shape_type == 'square':
+                draw.rectangle([x-size_base, y-size_base, x+size_base, y+size_base], fill=primary_color)
+                
+        elif animation_type == 'growing_shape':
+            size: int = size_base + (i * 3)
+            x: int = width//2 - size//2
+            y: int = height//2 - size//2
+            if shape_type == 'circle':
+                draw.ellipse([x, y, x+size, y+size], fill=primary_color)
+            elif shape_type == 'square':
+                draw.rectangle([x, y, x+size, y+size], fill=primary_color)
+                
+        elif animation_type == 'bouncing_shape':
+            x: int = width//2
+            y: int = height//2 + int(20 * np.sin(i * speed * np.pi / 5))
+            if shape_type == 'circle':
+                draw.ellipse([x-size_base, y-size_base, x+size_base, y+size_base], fill=primary_color)
+            elif shape_type == 'square':
+                draw.rectangle([x-size_base, y-size_base, x+size_base, y+size_base], fill=primary_color)
+                
+        elif animation_type == 'rotating_shape':
+            angle: float = i * 10 * speed
+            img_rotate: Image.Image = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+            draw_rotate: ImageDraw.Draw = ImageDraw.Draw(img_rotate)
+            if shape_type == 'square':
+                draw_rotate.rectangle([-size_base, -size_base, size_base, size_base], fill=primary_color)
+            img_rotate = img_rotate.rotate(angle)
+            img.paste(img_rotate, (width//2, height//2), img_rotate)
+            
+        elif animation_type == 'color_changing':
+            hue_shift: float = (i * 0.1 * speed) % 1.0
+            current_color: Tuple[int, int, int] = tuple(int(x * 255) for x in colorsys.hsv_to_rgb(hue_shift, 1, 1))
+            if shape_type == 'circle':
+                draw.ellipse([width//2-size_base, height//2-size_base, 
+                            width//2+size_base, height//2+size_base], fill=current_color)
+            elif shape_type == 'square':
+                draw.rectangle([width//2-size_base, height//2-size_base,
+                              width//2+size_base, height//2+size_base], fill=current_color)
+                
+        elif animation_type == 'multiple_shapes':
+            for j in range(3):
+                x: int = (start_x + int((i + j*10) * speed)) % width
+                y: int = start_y + j*15
+                if shape_type == 'circle':
+                    draw.ellipse([x-size_base//2, y-size_base//2, 
+                                x+size_base//2, y+size_base//2], fill=primary_color)
+                elif shape_type == 'square':
+                    draw.rectangle([x-size_base//2, y-size_base//2,
+                                  x+size_base//2, y+size_base//2], fill=primary_color)
+        
+        frames.append(img)
+    
+    frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=int(100/speed),
+        loop=0
+    )
+    
+    return {
+        'animation_type': animation_type,
+        'shape_type': shape_type,
+        'pattern_type': pattern_type,
+        'speed': speed,
+        'primary_color': primary_color,
+        'bg_color': bg_color
+    }
+
+def get_color_name(rgb: Tuple[int, int, int]) -> str:
+    """
+    Converts an RGB tuple to the closest approximate color name.
+
+    Args:
+        rgb (Tuple[int, int, int]): An RGB color tuple.
+
+    Returns:
+        str: The closest color name.
+    """
+    colors: Dict[str, Tuple[int, int, int]] = {
+        'red': (255, 0, 0),
+        'green': (0, 255, 0),
+        'blue': (0, 0, 255),
+        'yellow': (255, 255, 0),
+        'purple': (128, 0, 128),
+        'orange': (255, 165, 0),
+        'pink': (255, 192, 203),
+        'brown': (165, 42, 42),
+        'gray': (128, 128, 128)
+    }
+    
+    min_distance: float = float('inf')
+    closest_color: str = 'unknown'
+    
+    for name, value in colors.items():
+        distance: int = sum((a - b) ** 2 for a, b in zip(rgb, value))
+        if distance < min_distance:
+            min_distance = distance
+            closest_color = name
+    
+    return closest_color
+
+def generate_prompt(params: Dict) -> str:
+    """
+    Generates a detailed and varied text prompt based on animation parameters.
+
+    Args:
+        params (Dict): A dictionary of parameters for the generated animation.
+
+    Returns:
+        str: The generated text prompt.
+    """
+    action_templates: Dict[str, List[str]] = {
+        'moving_shape': [
+            "A {color} {shape} sliding smoothly across a {pattern} {bg_color} background",
+            "An animated {color} {shape} traveling from left to right over {pattern} {bg_color} backdrop",
+            "{color} {shape} in motion against a {pattern} {bg_color} scene"
+        ],
+        'growing_shape': [
+            "A {color} {shape} expanding gradually on a {pattern} {bg_color} canvas",
+            "An enlarging {color} {shape} centered on a {pattern} {bg_color} background",
+            "Dynamic animation of a {color} {shape} growing in size with {pattern} {bg_color} backdrop"
+        ],
+        'bouncing_shape': [
+            "A {color} {shape} bouncing rhythmically on a {pattern} {bg_color} surface",
+            "Animated {color} {shape} moving up and down against {pattern} {bg_color} background",
+            "Playful {color} {shape} bouncing with {pattern} {bg_color} backdrop"
+        ],
+        'rotating_shape': [
+            "A {color} {shape} spinning smoothly on a {pattern} {bg_color} background",
+            "Rotating {color} {shape} animation with {pattern} {bg_color} backdrop",
+            "Dynamic {color} {shape} turning in space against {pattern} {bg_color} scene"
+        ],
+        'color_changing': [
+            "A mesmerizing {shape} shifting through rainbow colors on {pattern} {bg_color} background",
+            "Color-morphing {shape} display against {pattern} {bg_color} backdrop",
+            "Prismatic {shape} animation with changing hues on {pattern} {bg_color} canvas"
+        ],
+        'multiple_shapes': [
+            "Three {color} {shape}s moving in parallel on {pattern} {bg_color} background",
+            "Trio of animated {color} {shape}s with {pattern} {bg_color} backdrop",
+            "Synchronized {color} {shape}s dancing across {pattern} {bg_color} scene"
+        ]
+    }
+    
+    speed_desc: str = "quickly" if params['speed'] > 1.5 else "slowly" if params['speed'] < 0.8 else "steadily"
+    
+    template: str = random.choice(action_templates[params['animation_type']])
+    prompt: str = template.format(
+        color=get_color_name(params['primary_color']),
+        shape=params['shape_type'],
+        pattern=params['pattern_type'],
+        bg_color=get_color_name(params['bg_color'])
+    )
+    
+    if params['animation_type'] in ['moving_shape', 'rotating_shape', 'bouncing_shape']:
+        prompt = prompt.replace('moving', f'moving {speed_desc}')
+        prompt = prompt.replace('spinning', f'spinning {speed_desc}')
+        prompt = prompt.replace('bouncing', f'bouncing {speed_desc}')
+    
+    return prompt
+
+def generate_sample(args: Tuple[int, str, Dict]) -> None:
+    """
+    Generates a single sample (GIF and prompt) for multiprocessing.
+
+    Args:
+        args: Tuple containing sample index, training directory, and dict of generated prompts.
+    """
+    i, training_dir, generated_prompts = args
+    sample_id: str = f"{i:05d}"
+    
+    while True:
+        gif_path: str = os.path.join(training_dir, f"{sample_id}.gif")
+        params: Dict = generate_synthetic_gif(gif_path)
+        prompt: str = generate_prompt(params)
+        
+        with multiprocessing.Lock():
+            if prompt not in generated_prompts:
+                generated_prompts[prompt] = True  # Use dict key to track uniqueness
+                prompt_path: str = os.path.join(training_dir, f"{sample_id}.txt")
+                with open(prompt_path, 'w') as f:
+                    f.write(prompt)
+                break
+
+def generate_dataset(n_samples: int=10000, num_processes: int=None) -> str:
+    """
+    Generates a complete synthetic video dataset using multiprocessing.
+
+    Args:
+        n_samples (int): The number of samples to generate.
+        num_processes (int): Number of processes to use (defaults to min of CPU count and provided value).
+
+    Returns:
+        str: The base directory path where the dataset is saved.
+    """
+    training_dir: str = create_directory_structure()
+    
+    if num_processes is None:
+        num_processes = multiprocessing.cpu_count()
+    else:
+        num_processes = min(num_processes, multiprocessing.cpu_count())
+    
+    print(f"Generating {n_samples} samples using {num_processes} processes...")
+    
+    manager = multiprocessing.Manager()
+    generated_prompts = manager.dict()  # Use dict instead of Set
+    
+    args_list = [(i, training_dir, generated_prompts) for i in range(n_samples)]
+    
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        list(tqdm(pool.imap(generate_sample, args_list), total=n_samples, desc="Generating samples"))
+    
+    print("Dataset generation complete!")
+    return training_dir
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Generate synthetic video dataset")
+    parser.add_argument("-n", "--n_samples", type=int, default=10000, help="Number of samples to generate")
+    parser.add_argument("-p", "--num_processes", type=int, default=None, help="Number of processes to use")
+    args = parser.parse_args()
+    
+    output_dir: str = generate_dataset(n_samples=args.n_samples, num_processes=args.num_processes)
+    print(f"Dataset saved to: {output_dir}")
