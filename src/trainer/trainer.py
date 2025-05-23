@@ -45,6 +45,7 @@ class Trainer:
         self,
         diffusion_model: nn.Module,  # Diffusion model to train
         folder: str,  # Path to the folder containing training data
+        device=device,
         *,
         ema_decay: float = 0.995,  # Exponential moving average decay rate
         num_frames: int = 16,  # Number of frames per video in the dataset
@@ -92,7 +93,7 @@ class Trainer:
         self.image_size = diffusion_model.image_size
         self.gradient_accumulate_every = gradient_accumulate_every
         self.train_num_steps = train_num_steps
-        
+        self.device = device
         # Initialize dataset and dataloader
         self.ds = Dataset(folder, image_size=diffusion_model.image_size, 
                           channels=diffusion_model.channels, num_frames=diffusion_model.num_frames)
@@ -194,7 +195,7 @@ class Trainer:
                 if len(data) == 2:
                     video_data, text_data = data
 
-                video_data = video_data.cuda()
+                video_data = video_data.to(self.device)
 
                 with autocast(enabled=self.amp):  # Automatic mixed precision
                     if text_data is not None:
