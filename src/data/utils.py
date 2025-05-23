@@ -88,7 +88,6 @@ def gif_to_tensor(
     return torch.stack(tensors, dim=1)  # Stack frames along the temporal dimension
 
 def mp4_to_tensor(
-def mp4_to_tensor(
     path: str,
     channels: int = 3,
     transform: T.Compose = T.ToTensor()
