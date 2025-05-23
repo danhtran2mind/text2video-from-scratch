@@ -103,14 +103,14 @@ def mp4_to_tensor(
     Returns:
         torch.Tensor: The video tensor of shape (channels, frames, height, width).
     """
-    # Read the MP4 video
-    reader = imageio.get_reader(path, 'ffmpeg')
+    # Read MP4 video frames iteratively
+    frames = imageio.imiter(path, plugin='pyav')
     
     # List to store transformed frames
     tensors = []
     
     # Process each frame
-    for frame in reader:
+    for frame in frames:
         # Convert frame (numpy array) to PIL Image
         frame = Image.fromarray(frame)
         
@@ -128,11 +128,8 @@ def mp4_to_tensor(
         tensor = transform(frame)
         tensors.append(tensor)
     
-    # Close the reader
-    reader.close()
-    
     # Stack frames along the temporal dimension
-    return torch.stack(tensors, dim=1)
+    return torch.stack.tensors, dim=1)
 
 def identity(t, *args, **kwargs):
     """
