@@ -13,7 +13,7 @@ from src.diffusion.gaussian_diffusion import GaussianDiffusion
 CONFIG_PATH = "configs/default.yaml"
 DEFAULT_MODEL_PATH = "./saved_models"
 DEFAULT_OUTPUT_DIR = "./results"
-
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
@@ -47,7 +47,7 @@ def load_model(model_path: str, config: dict) -> GaussianDiffusion:
     diffusion = GaussianDiffusion(
         denoise_fn=model,
         **config["diffusion"]
-    ).cuda()
+    ).to(DEVICE)
 
     # Find the latest model checkpoint
     if os.path.isdir(model_path):
