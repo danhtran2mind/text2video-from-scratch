@@ -4,7 +4,7 @@ from torchvision import transforms as T
 from pathlib import Path
 from functools import partial
 from typing import Optional, Tuple, List
-from src.data.utils import gif_to_tensor, cast_num_frames, identity
+from src.data.utils import gif_to_tensor, mp4_to_tensor, cast_num_frames, identity
 from src.utils.helper_functions import exists
 
 
@@ -71,8 +71,8 @@ class Dataset(data.Dataset):
         path = self.paths[index]
 
         # Load the GIF as a tensor and apply transformations
-        tensor = gif_to_tensor(path, self.channels, transform=self.transform)
-
+        # tensor = gif_to_tensor(path, self.channels, transform=self.transform)
+        tensor = mp4_to_tensor(path, self.channels, transform=self.transform)
         # Adjust the number of frames if necessary
         tensor = self.cast_num_frames_fn(tensor)
 
