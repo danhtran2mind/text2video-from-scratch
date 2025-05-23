@@ -45,7 +45,7 @@ class Trainer:
         self,
         diffusion_model: nn.Module,  # Diffusion model to train
         folder: str,  # Path to the folder containing training data
-        device=device,
+        device: str,
         *,
         ema_decay: float = 0.995,  # Exponential moving average decay rate
         num_frames: int = 16,  # Number of frames per video in the dataset
