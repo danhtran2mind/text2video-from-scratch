@@ -11,4 +11,4 @@ transformers[torch]
 tqdm
 kaggle
 datasets
-imageio
+imageio[pyav]
