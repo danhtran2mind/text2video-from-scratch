@@ -1644,7 +1644,7 @@ pip install -r requirements.txt
 
 You can modify the architecture under `src/architecture/` and the training parameters under `configs/default.yaml` to suit your needs. The default configuration file contains hyperparameters for training the model.
 
-We already have a data_generation script that generates synthetic object data or loads the MSRVTT dataset. You can use this script to generate training data for the model. The data generation script is located at `src/data_generation/synthetic_object.py` and `src/data_generation/msrvtt.py`.
+We already have a data_generation script that generates synthetic object data or loads the MSRVTT dataset. You can use this script to generate training data for the model. The data generation script is located at `data_generation/synthetic_object.py` and `data_generation/msrvtt.py`.
 
 data_generation script will generate training data under the default directory `training_data/`. You can modify the script to generate data in a different directory.
 
